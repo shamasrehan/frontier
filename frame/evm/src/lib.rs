@@ -82,6 +82,7 @@ use frame_support::{
 		},
 		FindAuthor, Get, Time,
 	},
+	unsigned::TransactionValidityError,
 	weights::Weight,
 };
 use frame_system::RawOrigin;
@@ -89,6 +90,7 @@ use sp_core::{Decode, Encode, Hasher, H160, H256, U256};
 use sp_runtime::{
 	traits::{BadOrigin, Saturating, UniqueSaturatedInto, Zero},
 	AccountId32, DispatchErrorWithPostInfo,
+	transaction_validity::InvalidTransaction,
 };
 use sp_std::{cmp::min, collections::btree_map::BTreeMap, vec::Vec};
 // Frontier
@@ -140,6 +142,7 @@ pub mod pallet {
 		type AddressMapping: AddressMapping<Self::AccountId>;
 		/// Currency type for withdraw and balance storage.
 		type Currency: Currency<Self::AccountId> + Inspect<Self::AccountId>;
+		//type Energy: Currency<Self::AccountId> + Inspect<Self::AccountId>;
 
 		/// The overarching event type.
 		type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
@@ -879,7 +882,7 @@ pub trait OnChargeEVMTransaction<T: Config> {
 
 	/// Before the transaction is executed the payment of the transaction fees
 	/// need to be secured.
-	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, Error<T>>;
+	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, TransactionValidityError>;
 
 	/// After the transaction was executed the actual fee can be calculated.
 	/// This function should refund any overpaid fees and optionally deposit
@@ -922,30 +925,39 @@ where
 	// Kept type as Option to satisfy bound of Default
 	type LiquidityInfo = Option<NegativeImbalanceOf<C, T>>;
 
-	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, Error<T>> {
+	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, TransactionValidityError> {
 		if fee.is_zero() {
 			return Ok(None);
 		}
 		let account_id = T::AddressMapping::into_account_id(*who);
 
-		if E::free_balance(who) > E::minimum_balance(){
+
+		let amt = UniqueSaturatedInto::<u128>::unique_saturated_into(fee);
+		let amt2: <E as Currency<<T as frame_system::Config>::AccountId>>::Balance = amt.try_into().unwrap_or_else(|_| panic!("failed to convert"));
+		
+
+		if E::free_balance(&account_id) > E::minimum_balance(){
 			log::info!("Switching to E module...");
-			let imbalance = E::withdraw(
+			match E::withdraw(
 				&account_id,
-				fee.unique_saturated_into(),
+				amt2,
 				WithdrawReasons::FEE,
-				ExistenceRequirement::AllowDeath,
-			)
-			.map_err(|_| Error::<T>::BalanceLow)?;
+				ExistenceRequirement::KeepAlive
+			) {
+				Ok(_imbalance) => Ok(None),
+				Err(_) => Err(InvalidTransaction::Payment.into()),
+			}
 		}else{
 			log::info!("Switching to C module...");
-			let imbalance = C::withdraw(
+			match C::withdraw(
 				&account_id,
 				fee.unique_saturated_into(),
 				WithdrawReasons::FEE,
-				ExistenceRequirement::AllowDeath,
-			)
-			.map_err(|_| Error::<T>::BalanceLow)?;
+				ExistenceRequirement::KeepAlive
+			) {
+				Ok(imbalance) => Ok(Some(imbalance)),
+				Err(_) => Err(InvalidTransaction::Payment.into()),
+			}
 		}
 
 
@@ -966,7 +978,6 @@ where
 		// 	}
 		// }
 
-		Ok(Some(imbalance))
 	}
 
 	fn correct_and_deposit_fee(
@@ -1030,39 +1041,39 @@ where
 }
 
 /// Implementation for () does not specify what to do with imbalance
-impl<T> OnChargeEVMTransaction<T> for ()
-	where
-	T: Config,
-	<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::PositiveImbalance:
-		Imbalance<<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance, Opposite = <T::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance>,
-	<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance:
-Imbalance<<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance, Opposite = <T::Currency as Currency<<T as frame_system::Config>::AccountId>>::PositiveImbalance>,
-U256: UniqueSaturatedInto<BalanceOf<T>>,
+// impl<T> OnChargeEVMTransaction<T> for ()
+// 	where
+// 	T: Config,
+// 	<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::PositiveImbalance:
+// 		Imbalance<<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance, Opposite = <T::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance>,
+// 	<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::NegativeImbalance:
+// Imbalance<<T::Currency as Currency<<T as frame_system::Config>::AccountId>>::Balance, Opposite = <T::Currency as Currency<<T as frame_system::Config>::AccountId>>::PositiveImbalance>,
+// U256: UniqueSaturatedInto<BalanceOf<T>>,
 
-{
-	// Kept type as Option to satisfy bound of Default
-	type LiquidityInfo = Option<NegativeImbalanceOf<T::Currency, T>>;
+// {
+// 	// Kept type as Option to satisfy bound of Default
+// 	type LiquidityInfo = Option<NegativeImbalanceOf<T::Currency, T>>;
 
-	fn withdraw_fee(
-		who: &H160,
-		fee: U256,
-	) -> Result<Self::LiquidityInfo, Error<T>> {
-		EVMCurrencyAdapter::<<T as Config>::Currency, ()>::withdraw_fee(who, fee)
-	}
+// 	fn withdraw_fee(
+// 		who: &H160,
+// 		fee: U256,
+// 	) -> Result<Self::LiquidityInfo, TransactionValidityError> {
+// 		EVMCurrencyAdapter::<<T as Config>::Currency, <T as Config>::Energy, ()>::withdraw_fee(who, fee)
+// 	}
 
-	fn correct_and_deposit_fee(
-		who: &H160,
-		corrected_fee: U256,
-		base_fee: U256,
-		already_withdrawn: Self::LiquidityInfo,
-	) -> Self::LiquidityInfo {
-		<EVMCurrencyAdapter::<<T as Config>::Currency, ()> as OnChargeEVMTransaction<T>>::correct_and_deposit_fee(who, corrected_fee, base_fee, already_withdrawn)
-	}
+// 	fn correct_and_deposit_fee(
+// 		who: &H160,
+// 		corrected_fee: U256,
+// 		base_fee: U256,
+// 		already_withdrawn: Self::LiquidityInfo,
+// 	) -> Self::LiquidityInfo {
+// 		<EVMCurrencyAdapter::<<T as Config>::Currency, <T as Config>::Energy, ()> as OnChargeEVMTransaction<T>>::correct_and_deposit_fee(who, corrected_fee, base_fee, already_withdrawn)
+// 	}
 
-	fn pay_priority_fee(tip: Self::LiquidityInfo) {
-		<EVMCurrencyAdapter::<<T as Config>::Currency, ()> as OnChargeEVMTransaction<T>>::pay_priority_fee(tip);
-	}
-}
+// 	fn pay_priority_fee(tip: Self::LiquidityInfo) {
+// 		<EVMCurrencyAdapter::<<T as Config>::Currency, <T as Config>::Energy, ()> as OnChargeEVMTransaction<T>>::pay_priority_fee(tip);
+// 	}
+// }
 
 pub trait OnCreate<T> {
 	fn on_create(owner: H160, contract: H160);
