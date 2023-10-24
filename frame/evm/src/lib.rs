@@ -71,6 +71,7 @@ pub use evm::{
 use impl_trait_for_tuples::impl_for_tuples;
 use scale_info::TypeInfo;
 // Substrate
+
 use frame_support::{
 	dispatch::{DispatchResultWithPostInfo, MaxEncodedLen, Pays, PostDispatchInfo},
 	traits::{
@@ -82,7 +83,6 @@ use frame_support::{
 		},
 		FindAuthor, Get, Time,
 	},
-	unsigned::TransactionValidityError,
 	weights::Weight,
 };
 use frame_system::RawOrigin;
@@ -90,7 +90,6 @@ use sp_core::{Decode, Encode, Hasher, H160, H256, U256};
 use sp_runtime::{
 	traits::{BadOrigin, Saturating, UniqueSaturatedInto, Zero},
 	AccountId32, DispatchErrorWithPostInfo,
-	transaction_validity::InvalidTransaction,
 };
 use sp_std::{cmp::min, collections::btree_map::BTreeMap, vec::Vec};
 // Frontier
@@ -882,7 +881,7 @@ pub trait OnChargeEVMTransaction<T: Config> {
 
 	/// Before the transaction is executed the payment of the transaction fees
 	/// need to be secured.
-	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, TransactionValidityError>;
+	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, Error<T>>;
 
 	/// After the transaction was executed the actual fee can be calculated.
 	/// This function should refund any overpaid fees and optionally deposit
@@ -925,7 +924,7 @@ where
 	// Kept type as Option to satisfy bound of Default
 	type LiquidityInfo = Option<NegativeImbalanceOf<C, T>>;
 
-	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, TransactionValidityError> {
+	fn withdraw_fee(who: &H160, fee: U256) -> Result<Self::LiquidityInfo, Error<T>> {
 		if fee.is_zero() {
 			return Ok(None);
 		}
@@ -935,6 +934,9 @@ where
 		let amt = UniqueSaturatedInto::<u128>::unique_saturated_into(fee);
 		let amt2: <E as Currency<<T as frame_system::Config>::AccountId>>::Balance = amt.try_into().unwrap_or_else(|_| panic!("failed to convert"));
 		
+		// Ok(info) => info,
+		// Error(_) => Error::<T>::BalanceLow
+		// }
 
 		if E::free_balance(&account_id) > E::minimum_balance(){
 			log::info!("Switching to E module...");
@@ -945,7 +947,7 @@ where
 				ExistenceRequirement::KeepAlive
 			) {
 				Ok(_imbalance) => Ok(None),
-				Err(_) => Err(InvalidTransaction::Payment.into()),
+				Err(_) => Err(Error::<T>::BalanceLow)
 			}
 		}else{
 			log::info!("Switching to C module...");
@@ -956,7 +958,7 @@ where
 				ExistenceRequirement::KeepAlive
 			) {
 				Ok(imbalance) => Ok(Some(imbalance)),
-				Err(_) => Err(InvalidTransaction::Payment.into()),
+				Err(_) => Err(Error::<T>::BalanceLow)
 			}
 		}
 
@@ -1057,7 +1059,7 @@ where
 // 	fn withdraw_fee(
 // 		who: &H160,
 // 		fee: U256,
-// 	) -> Result<Self::LiquidityInfo, TransactionValidityError> {
+// 	) -> Result<Self::LiquidityInfo, Error<T>> {
 // 		EVMCurrencyAdapter::<<T as Config>::Currency, <T as Config>::Energy, ()>::withdraw_fee(who, fee)
 // 	}
 
